@@ -1,0 +1,25 @@
+# Configuration centrale du Quantum Retro-Causal Engine
+
+trading:
+  risk_tolerance: 0.12
+  prediction_horizon: 24
+  update_frequency: 300
+  resonance_weight: 0.35
+  emergence_weight: 0.25
+  cost_weight: 0.25
+  memory_weight: 0.15
+
+engine:
+  n_futures: 5000
+  max_workers: 4
+  checkpoint_dir: checkpoints/
+  log_level: INFO
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1
+
+monitoring:
+  prometheus_enabled: true
+  grafana_enabled: true 

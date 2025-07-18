@@ -1,0 +1,623 @@
+# docker-compose.prod.yml
+# Configuration production optimisée pour Quantum Retro-Causal Engine
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+
+version: '3.8'
+
+# ===== CONFIGURATION PRODUCTION =====
+services:
+  
+  # ===== ENGINE PRODUCTION OPTIMISÉ =====
+  quantum-engine:
+    build:
+      target: production
+      args:
+        - BUILD_ENV=production
+        - ENABLE_CPP=true
+        - ENABLE_PROFILING=false
+    
+    image: quantum-engine:${IMAGE_TAG:-prod}
+    
+    # Configuration production
+    environment:
+      # Production settings
+      - QUANTUM_ENV=production
+      - DEBUG=false
+      - PYTHONOPTIMIZE=2
+      - PYTHONDONTWRITEBYTECODE=1
+      
+      # Performance
+      - QUANTUM_WORKERS=${QUANTUM_WORKERS:-8}
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
+      - MALLOC_ARENA_MAX=2
+      
+      # Monitoring production
+      - PROMETHEUS_ENABLED=true
+      - METRICS_EXPORT_INTERVAL=30
+      - LOG_LEVEL=INFO
+      
+      # Sécurité
+      - QUANTUM_SECRET_KEY_FILE=/run/secrets/quantum_secret_key
+      - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      - SSL_ENABLED=true
+      
+      # Base de données sécurisée
+      - DATABASE_URL=postgresql://quantum:$(cat /run/secrets/postgres_password)@postgres:5432/quantum_db?sslmode=require
+      - DATABASE_POOL_SIZE=20
+      - DATABASE_MAX_OVERFLOW=30
+      
+      # Cache optimisé
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_POOL_SIZE=10
+      
+      # Alerting
+      - SLACK_WEBHOOK_URL_FILE=/run/secrets/slack_webhook
+      - EMAIL_ENABLED=true
+    
+    # Secrets production
+    secrets:
+      - quantum_secret_key
+      - jwt_secret  
+      - postgres_password
+      - slack_webhook
+      - ssl_certificate
+      - ssl_private_key
+    
+    # Réplication et load balancing
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        failure_action: pause
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+          pids: 2000
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    
+    # Healthcheck production rigoureux
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    
+    # Ports optimisés
+    ports:
+      - target: 8000
+        published: 8000
+        protocol: tcp
+        mode: ingress
+    
+    # Volumes production read-only
+    volumes:
+      - type: volume
+        source: quantum_logs_prod
+        target: /app/logs
+      - type: volume
+        source: quantum_checkpoints_prod
+        target: /app/checkpoints
+      - type: volume
+        source: quantum_backups_prod
+        target: /app/backups
+      
+      # Configuration en lecture seule
+      - type: bind
+        source: ./config.prod.yaml
+        target: /app/config.yaml
+        read_only: true
+    
+    # Sécurité renforcée
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    
+    # User non-root strict
+    user: "1001:1001"
+    
+    # Syscalls limités
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_tw_reuse=1
+    
+    # Logging production
+    logging:
+      driver: "gelf"
+      options:
+        gelf-address: "udp://logstash:12201"
+        tag: "quantum-engine"
+        labels: "environment,service,version"
+
+  # ===== POSTGRESQL CLUSTER PRODUCTION =====
+  postgres:
+    image: postgres:15-alpine
+    
+    # Configuration haute disponibilité
+    environment:
+      - POSTGRES_DB=quantum_db
+      - POSTGRES_USER=quantum
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256
+      - POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+      
+      # Performance production
+      - POSTGRES_SHARED_BUFFERS=1GB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=3GB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=256MB
+      - POSTGRES_MAX_CONNECTIONS=500
+      - POSTGRES_WAL_BUFFERS=64MB
+    
+    secrets:
+      - postgres_password
+    
+    # Volumes production avec backup
+    volumes:
+      - type: volume
+        source: postgres_data_prod
+        target: /var/lib/postgresql/data
+      - type: volume
+        source: postgres_wal_prod
+        target: /var/lib/postgresql/wal
+      - type: volume
+        source: postgres_backup_prod
+        target: /backup
+      
+      # Scripts de production
+      - type: bind
+        source: ./sql/prod-init.sql
+        target: /docker-entrypoint-initdb.d/init.sql
+        read_only: true
+    
+    # Configuration PostgreSQL optimisée
+    command: |
+      postgres
+        -c shared_preload_libraries=pg_stat_statements,pg_buffercache,auto_explain
+        -c max_connections=500
+        -c shared_buffers=1GB
+        -c effective_cache_size=3GB
+        -c work_mem=16MB
+        -c maintenance_work_mem=256MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=64MB
+        -c default_statistics_target=1000
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c max_worker_processes=8
+        -c max_parallel_workers_per_gather=4
+        -c max_parallel_workers=8
+        -c synchronous_commit=on
+        -c wal_compression=on
+        -c log_min_duration_statement=1000
+        -c log_checkpoints=on
+        -c log_connections=on
+        -c log_disconnections=on
+        -c log_lock_waits=on
+        -c auto_explain.log_min_duration=5000
+        -c auto_explain.log_analyze=true
+        -c auto_explain.log_buffers=true
+        -c track_activity_query_size=2048
+        -c track_functions=all
+        -c track_io_timing=on
+    
+    # Deploy configuration
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    
+    # Healthcheck production
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantum -d quantum_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
+    # Backup automatique
+    labels:
+      - "backup.enable=true"
+      - "backup.schedule=0 2 * * *"  # 2h du matin
+
+  # ===== REDIS CLUSTER PRODUCTION =====
+  redis:
+    image: redis:7-alpine
+    
+    # Redis en mode cluster ou sentinel pour HA
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 64mb
+      --maxmemory 4gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --tcp-keepalive 300
+      --timeout 0
+      --tcp-backlog 511
+      --databases 16
+      --maxclients 10000
+    
+    # Volume production
+    volumes:
+      - type: volume
+        source: redis_data_prod
+        target: /data
+    
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    
+    # Healthcheck Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===== NGINX INGRESS PRODUCTION =====
+  nginx:
+    image: nginx:1.25-alpine
+    
+    # Configuration SSL/TLS
+    volumes:
+      - type: bind
+        source: ./nginx/prod.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+      - type: bind
+        source: ./ssl/
+        target: /etc/nginx/ssl
+        read_only: true
+      - type: volume
+        source: nginx_cache_prod
+        target: /var/cache/nginx
+      - type: volume
+        source: nginx_logs_prod
+        target: /var/log/nginx
+    
+    secrets:
+      - ssl_certificate
+      - ssl_private_key
+    
+    # Ports avec SSL
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Healthcheck Nginx
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== PROMETHEUS PRODUCTION =====
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    
+    # Configuration haute disponibilité
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
+      - '--storage.tsdb.retention.size=50GB'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.external-url=https://prometheus.quantum.local'
+      - '--alertmanager.url=http://alertmanager:9093'
+    
+    volumes:
+      - type: volume
+        source: prometheus_data_prod
+        target: /prometheus
+      - type: bind
+        source: ./monitoring/prometheus.prod.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - type: bind
+        source: ./monitoring/rules/
+        target: /etc/prometheus/rules
+        read_only: true
+    
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 8G
+        reservations:
+          cpus: '1.0'
+          memory: 4G
+
+  # ===== GRAFANA PRODUCTION =====
+  grafana:
+    image: grafana/grafana:10.0.0
+    
+    environment:
+      # Configuration production
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+      - GF_SECURITY_SECRET_KEY__FILE=/run/secrets/quantum_secret_key
+      - GF_SERVER_DOMAIN=grafana.quantum.local
+      - GF_SERVER_ROOT_URL=https://grafana.quantum.local
+      
+      # Base de données PostgreSQL
+      - GF_DATABASE_TYPE=postgres
+      - GF_DATABASE_HOST=postgres:5432
+      - GF_DATABASE_NAME=grafana
+      - GF_DATABASE_USER=grafana
+      - GF_DATABASE_PASSWORD__FILE=/run/secrets/postgres_password
+      - GF_DATABASE_SSL_MODE=require
+      
+      # SMTP pour alertes
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=smtp.quantum.local:587
+      - GF_SMTP_USER=alerts@quantum.local
+      - GF_SMTP_PASSWORD__FILE=/run/secrets/smtp_password
+      - GF_SMTP_FROM_ADDRESS=alerts@quantum.local
+      
+      # LDAP/OAuth (si nécessaire)
+      - GF_AUTH_LDAP_ENABLED=false
+      - GF_AUTH_OAUTH_AUTO_LOGIN=false
+      
+      # Sécurité
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_ALLOW_ORG_CREATE=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    
+    secrets:
+      - grafana_admin_password
+      - postgres_password
+      - quantum_secret_key
+      - smtp_password
+    
+    volumes:
+      - type: volume
+        source: grafana_data_prod
+        target: /var/lib/grafana
+      - type: bind
+        source: ./monitoring/grafana/dashboards/
+        target: /etc/grafana/provisioning/dashboards
+        read_only: true
+      - type: bind
+        source: ./monitoring/grafana/datasources/
+        target: /etc/grafana/provisioning/datasources
+        read_only: true
+      - type: bind
+        source: ./monitoring/grafana/alerting/
+        target: /etc/grafana/provisioning/alerting
+        read_only: true
+    
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+  # ===== ALERTMANAGER =====
+  alertmanager:
+    image: prom/alertmanager:v0.25.0
+    
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=https://alertmanager.quantum.local'
+      - '--cluster.listen-address=0.0.0.0:9094'
+    
+    volumes:
+      - type: volume
+        source: alertmanager_data_prod
+        target: /alertmanager
+      - type: bind
+        source: ./monitoring/alertmanager.prod.yml
+        target: /etc/alertmanager/config.yml
+        read_only: true
+    
+    secrets:
+      - slack_webhook
+      - smtp_password
+    
+    ports:
+      - "9093:9093"
+    
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ===== BLACKBOX EXPORTER =====
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.24.0
+    
+    volumes:
+      - type: bind
+        source: ./monitoring/blackbox.yml
+        target: /etc/blackbox_exporter/config.yml
+        read_only: true
+    
+    ports:
+      - "9115:9115"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+
+# ===== SECRETS PRODUCTION =====
+secrets:
+  quantum_secret_key:
+    external: true
+    name: quantum_secret_key_v2
+  jwt_secret:
+    external: true
+    name: jwt_secret_v2
+  postgres_password:
+    external: true
+    name: postgres_password_v2
+  grafana_admin_password:
+    external: true
+    name: grafana_admin_password_v2
+  ssl_certificate:
+    external: true
+    name: ssl_certificate_v2
+  ssl_private_key:
+    external: true
+    name: ssl_private_key_v2
+  slack_webhook:
+    external: true
+    name: slack_webhook_v1
+  smtp_password:
+    external: true
+    name: smtp_password_v1
+
+# ===== VOLUMES PRODUCTION =====
+volumes:
+  # Application
+  quantum_logs_prod:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=nfs.quantum.local,rw
+      device: ":/mnt/quantum/logs"
+  
+  quantum_checkpoints_prod:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=nfs.quantum.local,rw
+      device: ":/mnt/quantum/checkpoints"
+  
+  quantum_backups_prod:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=nfs.quantum.local,rw
+      device: ":/mnt/quantum/backups"
+  
+  # Base de données
+  postgres_data_prod:
+    driver: local
+    driver_opts:
+      type: ext4
+      device: /dev/disk/by-label/quantum-db
+  
+  postgres_wal_prod:
+    driver: local
+    driver_opts:
+      type: ext4
+      device: /dev/disk/by-label/quantum-wal
+  
+  postgres_backup_prod:
+    driver: local
+  
+  # Cache
+  redis_data_prod:
+    driver: local
+  
+  # Monitoring
+  prometheus_data_prod:
+    driver: local
+    driver_opts:
+      type: ext4
+      device: /dev/disk/by-label/prometheus
+  
+  grafana_data_prod:
+    driver: local
+  
+  alertmanager_data_prod:
+    driver: local
+  
+  # Nginx
+  nginx_cache_prod:
+    driver: local
+  
+  nginx_logs_prod:
+    driver: local
+
+# ===== RÉSEAUX PRODUCTION =====
+networks:
+  # Réseau frontend avec load balancer
+  quantum-frontend:
+    driver: overlay
+    attachable: false
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.0.1.0/24
+    
+  # Réseau backend sécurisé
+  quantum-backend:
+    driver: overlay
+    attachable: false
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.0.2.0/24
+    
+  # Réseau monitoring
+  quantum-monitoring:
+    driver: overlay
+    attachable: false
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.0.3.0/24
